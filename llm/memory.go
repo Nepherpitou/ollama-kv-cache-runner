@@ -3,6 +3,7 @@ package llm
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 
@@ -63,6 +64,8 @@ type MemoryEstimate struct {
 	memoryLayerOutput   uint64
 	graphFullOffload    uint64
 	graphPartialOffload uint64
+
+	projectorWeights, projectorGraph uint64
 }
 
 // Given a model and one or more GPU targets, predict how many layers and bytes we can load, and the total size
@@ -78,7 +81,8 @@ func EstimateGPULayers(gpus []discover.GpuInfo, ggml *GGML, projectors []string,
 	var graphOffload uint64
 
 	// Projectors loaded into GPU0 only
-	var projectorSize uint64
+	var projectorWeights uint64
+	var projectorGraph uint64
 
 	// Conditional output size on GPU 0
 	var memoryLayerOutput uint64
@@ -103,7 +107,9 @@ func EstimateGPULayers(gpus []discover.GpuInfo, ggml *GGML, projectors []string,
 	slog.Debug("evaluating", "library", gpus[0].Library, "gpu_count", len(gpus), "available", availableList)
 
 	for _, projector := range projectors {
-		projectorSize += projectorMemoryRequirements(projector)
+		weight, graph := projectorMemoryRequirements(projector)
+		projectorWeights += weight
+		projectorGraph += graph
 
 		// multimodal models require at least 2048 context
 		opts.NumCtx = max(opts.NumCtx, 2048)
@@ -157,7 +163,7 @@ func EstimateGPULayers(gpus []discover.GpuInfo, ggml *GGML, projectors []string,
 	}
 
 	// Output layer handled at the end if we have space
-	gpuZeroOverhead := projectorSize
+	gpuZeroOverhead := projectorWeights + projectorGraph
 
 	// Reduce set of GPUs to only those that have sufficient space to fit overhead and at least one layer
 	var layerCount int
@@ -311,6 +317,8 @@ func EstimateGPULayers(gpus []discover.GpuInfo, ggml *GGML, projectors []string,
 		memoryLayerOutput:   memoryLayerOutput,
 		graphFullOffload:    graphFullOffload,
 		graphPartialOffload: graphPartialOffload,
+		projectorWeights:    projectorWeights,
+		projectorGraph:      projectorGraph,
 	}
 
 	if gpus[0].Library == "cpu" {
@@ -331,7 +339,19 @@ func EstimateGPULayers(gpus []discover.GpuInfo, ggml *GGML, projectors []string,
 
 func (m MemoryEstimate) log() {
 	overhead := envconfig.GpuOverhead()
-	slog.Info(
+
+	log := slog.With()
+	if m.projectorWeights > 0 {
+		log = log.With(
+			slog.Group(
+				"projector",
+				"weights", format.HumanBytes2(m.projectorWeights),
+				"graph", format.HumanBytes2(m.projectorGraph),
+			),
+		)
+	}
+
+	log.Info(
 		"offload to "+m.inferenceLibrary,
 		slog.Group(
 			"layers",
@@ -406,4 +426,81 @@ func estimateKvCacheSize(cacheType string, numCtx, blockCount, embeddingHeadCoun
 	estimate := uint64(float64(numCtx*blockCount*embeddingHeadCount*headCountKV) * bytesPerElement)
 	// round up to the nearest multiple of 64 bytes
 	return ((estimate + 63) / 64) * 64
+}
+
+// estimateKvCacheSize determines the memory required for K or V cache based on the quantization type
+func estimateKvCacheSize(cacheType string, numCtx, blockCount, embeddingHeadCount, headCountKV uint64, isEmbeddingModel bool) uint64 {
+	var bytesPerElement float64
+
+	if isEmbeddingModel && cacheType != "f16" && cacheType != "f32" {
+		cacheType = "f16" // Default to f16 for embedding models if an unsupported type is specified
+	}
+
+	switch cacheType {
+	case "f32", "fp32":
+		bytesPerElement = 4 // fp32
+	case "", "f16", "fp16":
+		bytesPerElement = 2 // fp16
+	case "q4_0":
+		bytesPerElement = 0.5 // 1/4 of fp16
+	case "q8_0":
+		bytesPerElement = 1 // 1/2 of fp16
+	default:
+		// Default to fp16 if unknown
+		bytesPerElement = 2
+		slog.Warn("Unknown cache type, defaulting to fp16", "type", cacheType)
+	}
+
+	estimate := uint64(float64(numCtx*blockCount*embeddingHeadCount*headCountKV) * bytesPerElement)
+	// round up to the nearest multiple of 64 bytes
+	return ((estimate + 63) / 64) * 64
+}
+
+func projectorMemoryRequirements(filename string) (weights, graphSize uint64) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return 0, 0
+	}
+	defer file.Close()
+
+	ggml, _, err := DecodeGGML(file, 0)
+	if err != nil {
+		return 0, 0
+	}
+
+	for _, layer := range ggml.Tensors().Layers() {
+		weights += layer.size()
+	}
+
+	switch arch := ggml.KV().Architecture(); arch {
+	case "mllama":
+		kv := func(n string) uint64 {
+			if v, ok := ggml.KV()[arch+".vision."+n].(uint32); ok {
+				return uint64(v)
+			}
+
+			return 0
+		}
+
+		imageSize := kv("image_size")
+
+		maxNumTiles := kv("max_num_tiles")
+		embeddingLength := kv("embedding_length")
+		headCount := kv("attention.head_count")
+
+		numPatches := (imageSize / kv("patch_size")) * (imageSize / kv("patch_size"))
+		if _, ok := ggml.Tensors().Layers()["v"]["class_embd"]; ok {
+			numPatches++
+		}
+
+		numPaddedPatches := numPatches + 8 - (numPatches%8)%8
+
+		graphSize = 4 * (8 +
+			imageSize*imageSize*kv("num_channels")*maxNumTiles +
+			embeddingLength*numPatches*maxNumTiles +
+			9*embeddingLength*numPaddedPatches*maxNumTiles +
+			numPaddedPatches*maxNumTiles*numPaddedPatches*maxNumTiles*headCount)
+	}
+
+	return weights, graphSize
 }

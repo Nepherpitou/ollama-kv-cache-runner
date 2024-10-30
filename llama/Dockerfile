@@ -1,5 +1,5 @@
 # Note: once we have fully transitioned to the Go server, this will replace the old Dockerfile at the top of the tree
-ARG GOLANG_VERSION=1.22.5
+ARG GOLANG_VERSION=1.22.8
 ARG CMAKE_VERSION=3.22.1
 ARG CUDA_VERSION_11=11.3.1
 ARG CUDA_V11_ARCHITECTURES="50;52;53;60;61;62;70;72;75;80;86"
@@ -9,7 +9,7 @@ ARG ROCM_VERSION=6.1.2
 
 ### To create a local image for building linux binaries on mac or windows with efficient incremental builds
 #
-# docker build --platform linux/amd64 -t builder-amd64 -f Dockerfile.new --target unified-builder-amd64 .
+# docker build --platform linux/amd64 -t builder-amd64 -f llama/Dockerfile --target unified-builder-amd64 .
 # docker run --platform linux/amd64 --rm -it -v $(pwd):/go/src/github.com/ollama/ollama/ builder-amd64
 #
 ### Then incremental builds will be much faster in this container
@@ -41,7 +41,7 @@ ENTRYPOINT [ "zsh" ]
 ### To create a local image for building linux binaries on mac or linux/arm64 with efficient incremental builds
 # Note: this does not contain jetson variants
 #
-# docker build --platform linux/arm64 -t builder-arm64 -f Dockerfile.new --target unified-builder-arm64 .
+# docker build --platform linux/arm64 -t builder-arm64 -f llama/Dockerfile --target unified-builder-arm64 .
 # docker run --platform linux/arm64 --rm -it -v $(pwd):/go/src/github.com/ollama/ollama/ builder-arm64
 #
 FROM --platform=linux/arm64 rockylinux:8 AS unified-builder-arm64

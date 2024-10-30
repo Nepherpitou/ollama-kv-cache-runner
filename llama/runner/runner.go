@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/llama"
@@ -126,10 +127,10 @@ func (s *Server) NewSequence(prompt string, images []ImageData, params NewSequen
 
 	var sc *llama.SamplingContext
 	if params.samplingParams != nil {
-		sc = llama.NewSamplingContext(*params.samplingParams)
+		sc = llama.NewSamplingContext(s.model, *params.samplingParams)
 		for _, input := range inputs {
 			if input.embed == nil {
-				sc.Accept(s.lc, input.token, false)
+				sc.Accept(input.token, false)
 			}
 		}
 	}
@@ -206,6 +207,26 @@ func (s *Server) inputs(prompt string, images []ImageData) ([]input, error) {
 		}
 	}
 
+	if s.clip.cc != nil {
+		var embed [][]float32
+
+		if s.clip.cc.IsMllama && len(images) >= 1 {
+			hash := s.cache.HashImage(images[0].Data)
+
+			s.clip.mu.Lock()
+			var err error
+			embed, err = s.cache.FindImage(hash)
+			if err != nil {
+				embed = llama.NewMllamaImageEmbed(s.lc, s.clip.cc, images[0].Data, images[0].AspectRatioID)
+				s.cache.AddImage(hash, embed)
+			}
+			s.clip.mu.Unlock()
+		}
+		s.mu.Lock()
+		llama.MllamaSetCrossAttn(s.lc, s.clip.cc, embed)
+		s.mu.Unlock()
+	}
+
 	return inputs, nil
 }
 
@@ -275,17 +296,29 @@ func (s *Server) shiftContext(seq *Sequence) {
 }
 
 func flushPending(seq *Sequence) bool {
-	for _, p := range seq.pendingResponses {
-		select {
-		case seq.responses <- p:
-		case <-seq.quit:
-			seq.pendingResponses = []string{}
-			return false
-		}
+	joined := strings.Join(seq.pendingResponses, "")
+	seq.pendingResponses = []string{}
+
+	// Check if there are any partial UTF-8 characters remaining.
+	// We already check and queue as we are generating but some may
+	// still make it here:
+	// - Sequence is ending, e.g. generation limit has been hit
+	// - Invalid characters in the middle of a string
+	// This is a stricter check to ensure we never output invalid Unicode.
+	for !utf8.ValidString(joined) {
+		joined = joined[:len(joined)-1]
 	}
 
-	seq.pendingResponses = []string{}
-	return true
+	if len(joined) == 0 {
+		return true
+	}
+
+	select {
+	case seq.responses <- joined:
+		return true
+	case <-seq.quit:
+		return false
+	}
 }
 
 func (s *Server) removeSequence(seqIndex int, reason string) {
@@ -296,6 +329,9 @@ func (s *Server) removeSequence(seqIndex int, reason string) {
 	close(seq.responses)
 	close(seq.embedding)
 	seq.cache.InUse = false
+	if s.clip.cc != nil {
+		llama.MllamaSetCrossAttn(s.lc, s.clip.cc, nil)
+	}
 	s.seqs[seqIndex] = nil
 }
 
@@ -431,8 +467,8 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 		}
 
 		// sample a token
-		token := seq.samplingCtx.Sample(s.lc, nil, seq.iBatch)
-		seq.samplingCtx.Accept(s.lc, token, true)
+		token := seq.samplingCtx.Sample(s.lc, seq.iBatch)
+		seq.samplingCtx.Accept(token, true)
 		piece := s.model.TokenToPiece(token)
 
 		seq.numPredicted++
@@ -519,8 +555,9 @@ type Options struct {
 }
 
 type ImageData struct {
-	Data []byte `json:"data"`
-	ID   int    `json:"id"`
+	Data          []byte `json:"data"`
+	ID            int    `json:"id"`
+	AspectRatioID int    `json:"aspect_ratio_id"`
 }
 
 type CompletionRequest struct {
@@ -755,10 +792,17 @@ func (s *Server) loadModel(
 ) {
 	llama.BackendInit()
 
-	s.model = llama.LoadModelFromFile(mpath, params)
+	var err error
+	s.model, err = llama.LoadModelFromFile(mpath, params)
+	if err != nil {
+		panic(err)
+	}
 
 	ctxParams := llama.NewContextParams(kvSize, s.batchSize*s.parallel, s.parallel, threads, flashAttention, s.cacheTypeK, s.cacheTypeV)
-	s.lc = llama.NewContextWithModel(s.model, ctxParams)
+	s.lc, err = llama.NewContextWithModel(s.model, ctxParams)
+	if err != nil {
+		panic(err)
+	}
 
 	if lpath != "" {
 		err := s.model.ApplyLoraFromFile(s.lc, lpath, 1.0, threads)
@@ -772,7 +816,11 @@ func (s *Server) loadModel(
 	}
 
 	if ppath != "" {
-		s.clip.cc = llama.NewClipContext(ppath)
+		var err error
+		s.clip.cc, err = llama.NewClipContext(ppath)
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	s.cache = NewInputCache(s.lc, kvSize, s.parallel, multiUserCache)

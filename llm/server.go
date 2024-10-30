@@ -189,8 +189,6 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 		"--embedding",
 	}
 
-	params = append(params, "--log-disable")
-
 	if opts.NumGPU >= 0 {
 		params = append(params, "--n-gpu-layers", strconv.Itoa(opts.NumGPU))
 	}
@@ -518,26 +516,6 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 	return nil, finalErr
 }
 
-func projectorMemoryRequirements(filename string) uint64 {
-	file, err := os.Open(filename)
-	if err != nil {
-		return 0
-	}
-	defer file.Close()
-
-	ggml, _, err := DecodeGGML(file, 0)
-	if err != nil {
-		return 0
-	}
-
-	var mem uint64
-	for _, layer := range ggml.Tensors().Layers() {
-		mem += layer.size()
-	}
-
-	return mem
-}
-
 type ServerStatus int
 
 const ( // iota is reset to 0
@@ -749,8 +727,9 @@ ws ::= ([ \t\n] ws)?
 const maxBufferSize = 512 * format.KiloByte
 
 type ImageData struct {
-	Data []byte `json:"data"`
-	ID   int    `json:"id"`
+	Data          []byte `json:"data"`
+	ID            int    `json:"id"`
+	AspectRatioID int    `json:"aspect_ratio_id"`
 }
 
 type completion struct {
@@ -1053,7 +1032,10 @@ func (s *llmServer) Tokenize(ctx context.Context, content string) ([]int, error)
 	if resp.StatusCode == http.StatusNotFound {
 		if s.model == nil {
 			slog.Debug("new runner detected, loading model for cgo tokenization")
-			m := llama.LoadModelFromFile(s.modelPath, llama.ModelParams{VocabOnly: true})
+			m, err := llama.LoadModelFromFile(s.modelPath, llama.ModelParams{VocabOnly: true})
+			if err != nil {
+				return nil, err
+			}
 			s.model = m
 		}
 		return s.model.Tokenize(content, false, true)
@@ -1122,7 +1104,10 @@ func (s *llmServer) Detokenize(ctx context.Context, tokens []int) (string, error
 	if resp.StatusCode == http.StatusNotFound {
 		if s.model == nil {
 			slog.Debug("new runner detected, loading model for cgo tokenization")
-			m := llama.LoadModelFromFile(s.modelPath, llama.ModelParams{VocabOnly: true})
+			m, err := llama.LoadModelFromFile(s.modelPath, llama.ModelParams{VocabOnly: true})
+			if err != nil {
+				return "", err
+			}
 			s.model = m
 		}
 		var resp string
