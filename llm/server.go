@@ -219,7 +219,7 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 		params = append(params, "--threads", strconv.Itoa(defaultThreads))
 	}
 
-	if !opts.F16KV && envconfig.CacheTypeK() == "" && envconfig.CacheTypeV() == "" {
+	if !opts.F16KV && opts.CacheTypeK == "" && opts.CacheTypeV == "" {
 		params = append(params, "--memory-f32")
 	}
 
@@ -249,10 +249,6 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 		params = append(params, paramName, cacheType)
 		slog.Debug("Setting cache type", "param", paramName, "type", cacheType)
 	}
-
-	// Define cacheTypeK and cacheTypeV
-	cacheTypeK := envconfig.CacheTypeK()
-	cacheTypeV := envconfig.CacheTypeV()
 
 	// Set cache types only if they are not empty
 	supportsFlashAttention := func(ggml *GGML) bool {
@@ -296,13 +292,13 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 		params = append(params, "--flash-attn")
 		slog.Info("Enabling flash attention")
 
-		setCacheTypeParam("--cache-type-k", cacheTypeK)
-		setCacheTypeParam("--cache-type-v", cacheTypeV)
+		setCacheTypeParam("--cache-type-k", opts.CacheTypeK)
+		setCacheTypeParam("--cache-type-v", opts.CacheTypeV)
 	} else {
 		slog.Info("Flash attention not enabled")
 		quantizedCacheTypes := []string{"q8_0", "q5_1", "q5_0", "iq4_nl", "q4_1", "q4_0"}
-		if !isEmbeddingModel && (cacheTypeK != "" || cacheTypeV != "") {
-			if slices.Contains(quantizedCacheTypes, cacheTypeK) || slices.Contains(quantizedCacheTypes, cacheTypeV) {
+		if !isEmbeddingModel && (opts.CacheTypeK != "" || opts.CacheTypeV != "") {
+			if slices.Contains(quantizedCacheTypes, opts.CacheTypeK) || slices.Contains(quantizedCacheTypes, opts.CacheTypeV) {
 				slog.Warn("Quantized cache types require flash attention. Using default cache types.")
 			}
 		}
