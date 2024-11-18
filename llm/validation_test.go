@@ -1,5 +1,3 @@
-// llm/validation_test.go
-
 package llm
 
 import (

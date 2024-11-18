@@ -41,7 +41,7 @@ func ValidateFlashAttentionSupport(ggml GGMLModel, gpus discover.GpuInfoList, fl
 	hardwareSupported := true
 	for _, g := range gpus {
 		// only cuda (compute capability 7+) and metal support flash attention
-		if g.Library != "metal" && (g.Library != "cuda" || g.DriverMajor < 7) {
+		if g.Library != "metal" && (g.Library != "cuda" || g.DriverMajor < 7) && g.Library != "rocm" {
 			hardwareSupported = false
 			break
 		}
