@@ -15,7 +15,7 @@ type GGMLModel interface {
 	KV() KV
 }
 
-// Update the function signature to use the interface
+// ValidateFlashAttentionSupport checks if flash attention is supported by the model and hardware
 func ValidateFlashAttentionSupport(ggml GGMLModel, gpus discover.GpuInfoList, flashAttnRequested bool) FlashAttentionSupport {
 	isEmbeddingModel := false
 	if _, ok := ggml.KV()[fmt.Sprintf("%s.pooling_type", ggml.KV().Architecture())]; ok {
