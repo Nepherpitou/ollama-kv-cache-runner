@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -218,89 +217,14 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 		params = append(params, "--threads", strconv.Itoa(defaultThreads))
 	}
 
-	// isEmbeddingModel checks for common GGML attributes that help distinguish most embedding models from normal models.
-	isEmbeddingModel := false
-	if _, ok := ggml.KV()[fmt.Sprintf("%s.pooling_type", ggml.KV().Architecture())]; ok {
-		isEmbeddingModel = true
-	}
+	// Get flash attention support status
+	flashAttnSupport := ValidateFlashAttentionSupport(ggml, gpus, envconfig.FlashAttention())
 
-	// Validates and applies KV cache parameters
-	setCacheTypeParam := func(paramName, cacheType string) {
-		if cacheType == "" {
-			return
-		}
-
-		validCacheTypes := []string{"f32", "f16", "q8_0", "q5_1", "q5_0", "iq4_nl", "q4_1", "q4_0"}
-		if !slices.Contains(validCacheTypes, cacheType) {
-			slog.Warn("invalid cache type, ignoring", "param", paramName, "type", cacheType)
-			return
-		}
-
-		// For embedding models, only allow f16 and f32
-		if isEmbeddingModel && cacheType != "f16" && cacheType != "f32" {
-			slog.Warn("only f16 and f32 cache types are supported for embedding models, ignoring",
-				"param", paramName, "type", cacheType)
-			return
-		}
-
-		params = append(params, paramName, cacheType)
-		slog.Debug("Setting cache type", "param", paramName, "type", cacheType)
-	}
-
+	// Get KV cache type from config
 	kvCacheType := envconfig.KvCacheType()
 
-	// Set cache types only if they are not empty
-	supportsFlashAttention := func(ggml *GGML) bool {
-		headCountK := ggml.KV().EmbeddingHeadCountK()
-		headCountV := ggml.KV().EmbeddingHeadCountV()
-
-		if headCountK == 0 || headCountV == 0 {
-			slog.Debug("Model is missing embedding head count for K or V, does not support flash attention")
-			return false
-		}
-
-		if headCountK != headCountV {
-			slog.Debug("Embedding head count K does not equal V, does not support flash attention", "K", headCountK, "V", headCountV)
-			return false
-		}
-
-		slog.Debug("Model supports flash attention", "headCountK", headCountK, "headCountV", headCountV)
-		return true
-	}
-
-	flashAttnSupported := supportsFlashAttention(ggml)
-
-	hardwareSupportsFlashAttn := true
-	for _, g := range gpus {
-		// only cuda (compute capability 7+) and metal support flash attention
-		if g.Library != "metal" && (g.Library != "cuda" || g.DriverMajor < 7) {
-			hardwareSupportsFlashAttn = false
-			break
-		}
-	}
-
-	flashAttnEnabled := envconfig.FlashAttention() && flashAttnSupported && hardwareSupportsFlashAttn && !isEmbeddingModel
-
-	slog.Debug("Flash attention status",
-		"supported_by_model", flashAttnSupported,
-		"supported_by_hardware", hardwareSupportsFlashAttn,
-		"is_embedding_model", isEmbeddingModel,
-		"enabled", flashAttnEnabled)
-
-	if flashAttnEnabled {
-		params = append(params, "--flash-attn")
-		slog.Info("Enabling flash attention")
-
-		setCacheTypeParam("--kv-cache-type", kvCacheType)
-	} else {
-		slog.Info("Flash attention not enabled")
-		quantizedCacheTypes := []string{"q8_0", "q5_1", "q5_0", "iq4_nl", "q4_1", "q4_0"}
-		if !isEmbeddingModel && (kvCacheType != "") {
-			if slices.Contains(quantizedCacheTypes, kvCacheType) {
-				slog.Warn("Quantized cache types require flash attention. Falling back to default cache types.")
-			}
-		}
-	}
+	// Get validated parameters including flash attention and KV cache settings
+	params = GetServerParams(flashAttnSupport, kvCacheType, params)
 
 	// mmap has issues with partial offloading on metal
 	for _, g := range gpus {
