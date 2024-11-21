@@ -217,14 +217,11 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 		params = append(params, "--threads", strconv.Itoa(defaultThreads))
 	}
 
-	// Get flash attention support status
-	flashAttnSupport := ValidateFlashAttentionSupport(ggml, gpus, envconfig.FlashAttention())
-
 	// Get KV cache type from config
 	kvCacheType := envconfig.KvCacheType()
 
 	// Get validated parameters including flash attention and KV cache settings
-	params = GetServerParams(flashAttnSupport, kvCacheType, params)
+	params = GetServerParams(ggml, gpus, envconfig.FlashAttention(), kvCacheType, params)
 
 	// mmap has issues with partial offloading on metal
 	for _, g := range gpus {

@@ -88,6 +88,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"runtime/cgo"
 	"slices"
@@ -704,6 +705,7 @@ func KvCacheTypeFromStr(s string) C.enum_ggml_type {
 	case "q5_1":
 		return C.GGML_TYPE_Q5_1
 	default:
-		panic("Unsupported cache type: " + s)
+		slog.Warn("Unsupported cache type, defaulting to f16", "type", s)
+		return C.GGML_TYPE_F16
 	}
 }

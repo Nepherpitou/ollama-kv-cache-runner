@@ -74,7 +74,7 @@ func TestValidateFlashAttentionSupport(t *testing.T) {
 		kvData             map[string]any
 		gpus               discover.GpuInfoList
 		flashAttnRequested bool
-		want               FlashAttentionSupport
+		want               bool
 	}{
 		{
 			name: "supported model and hardware",
@@ -87,12 +87,7 @@ func TestValidateFlashAttentionSupport(t *testing.T) {
 				{Library: "cuda", DriverMajor: 8},
 			},
 			flashAttnRequested: true,
-			want: FlashAttentionSupport{
-				SupportedByModel:    true,
-				SupportedByHardware: true,
-				IsEmbeddingModel:    false,
-				Enabled:             true,
-			},
+			want:               true,
 		},
 		{
 			name: "embedding model",
@@ -106,12 +101,7 @@ func TestValidateFlashAttentionSupport(t *testing.T) {
 				{Library: "cuda", DriverMajor: 8},
 			},
 			flashAttnRequested: true,
-			want: FlashAttentionSupport{
-				SupportedByModel:    true,
-				SupportedByHardware: true,
-				IsEmbeddingModel:    true,
-				Enabled:             false,
-			},
+			want:               false,
 		},
 		{
 			name: "unsupported hardware",
@@ -124,12 +114,7 @@ func TestValidateFlashAttentionSupport(t *testing.T) {
 				{Library: "cuda", DriverMajor: 6},
 			},
 			flashAttnRequested: true,
-			want: FlashAttentionSupport{
-				SupportedByModel:    true,
-				SupportedByHardware: false,
-				IsEmbeddingModel:    false,
-				Enabled:             false,
-			},
+			want:               false,
 		},
 	}
 
@@ -144,37 +129,44 @@ func TestValidateFlashAttentionSupport(t *testing.T) {
 
 func TestGetServerParams(t *testing.T) {
 	tests := []struct {
-		name        string
-		flashAttn   FlashAttentionSupport
-		kvCacheType string
-		baseParams  []string
-		want        []string
+		name               string
+		ggml               GGMLModel
+		gpus               discover.GpuInfoList
+		flashAttnRequested bool
+		kvCacheType        string
+		baseParams         []string
+		want               []string
 	}{
 		{
 			name: "flash attention enabled with valid cache type",
-			flashAttn: FlashAttentionSupport{
-				Enabled:          true,
-				IsEmbeddingModel: false,
-			},
-			kvCacheType: "q8_0",
-			baseParams:  []string{"--model", "test"},
-			want:        []string{"--model", "test", "--flash-attn", "--kv-cache-type", "q8_0"},
+			ggml: &testGGML{kv: map[string]any{
+				"general.architecture":         "llama",
+				"llama.attention.key_length":   uint32(32),
+				"llama.attention.value_length": uint32(32),
+			}},
+			gpus:               discover.GpuInfoList{{Library: "cuda", DriverMajor: 8}},
+			flashAttnRequested: true,
+			kvCacheType:        "q8_0",
+			baseParams:         []string{"--model", "test"},
+			want:               []string{"--model", "test", "--flash-attn", "--kv-cache-type", "q8_0"},
 		},
 		{
 			name: "flash attention disabled",
-			flashAttn: FlashAttentionSupport{
-				Enabled:          false,
-				IsEmbeddingModel: false,
-			},
-			kvCacheType: "q8_0",
-			baseParams:  []string{"--model", "test"},
-			want:        []string{"--model", "test"},
+			ggml: &testGGML{kv: map[string]any{
+				"general.architecture": "bert",
+				"bert.pooling_type":    "mean",
+			}},
+			gpus:               discover.GpuInfoList{{Library: "cuda", DriverMajor: 8}},
+			flashAttnRequested: true,
+			kvCacheType:        "q8_0",
+			baseParams:         []string{"--model", "test"},
+			want:               []string{"--model", "test"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetServerParams(tt.flashAttn, tt.kvCacheType, tt.baseParams)
+			got := GetServerParams(tt.ggml, tt.gpus, tt.flashAttnRequested, tt.kvCacheType, tt.baseParams)
 			assert.Equal(t, tt.want, got)
 		})
 	}

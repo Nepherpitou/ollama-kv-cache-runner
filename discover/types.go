@@ -183,3 +183,24 @@ func (si SystemInfo) GetOptimalThreadCount() int {
 
 	return coreCount
 }
+
+// Return if the system supports flash attention
+func (l GpuInfoList) SupportsFlashAttention() bool {
+	for _, gpu := range l {
+		// Metal always supports flash attention
+		if gpu.Library == "metal" {
+			return true
+		}
+
+		// CUDA with compute capability 7+ supports flash attention
+		if gpu.Library == "cuda" && gpu.DriverMajor >= 7 {
+			return true
+		}
+
+		// ROCm supports flash attention
+		if gpu.Library == "rocm" {
+			return true
+		}
+	}
+	return false
+}
