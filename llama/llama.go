@@ -686,6 +686,8 @@ func (s *SamplingContext) Accept(id int, applyGrammar bool) {
 }
 
 // KvCacheTypeFromStr converts a string cache type to the corresponding GGML type value
+// Note the following llama.cpp cache types are not enabled:
+// "Q5_1", "Q5_0" , "IQ4_NL", "Q4_1"
 func KvCacheTypeFromStr(s string) C.enum_ggml_type {
 	switch s {
 	case "f32":
@@ -696,14 +698,6 @@ func KvCacheTypeFromStr(s string) C.enum_ggml_type {
 		return C.GGML_TYPE_Q8_0
 	case "q4_0":
 		return C.GGML_TYPE_Q4_0
-	case "q4_1":
-		return C.GGML_TYPE_Q4_1
-	case "iq4_nl":
-		return C.GGML_TYPE_IQ4_NL
-	case "q5_0":
-		return C.GGML_TYPE_Q5_0
-	case "q5_1":
-		return C.GGML_TYPE_Q5_1
 	default:
 		slog.Warn("Unsupported cache type, defaulting to f16", "type", s)
 		return C.GGML_TYPE_F16

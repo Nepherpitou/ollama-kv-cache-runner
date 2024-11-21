@@ -26,7 +26,14 @@ func TestValidateKVCacheType(t *testing.T) {
 		wantErr          bool
 	}{
 		{
-			name:             "valid type for normal model",
+			name:             "valid type for normal model with q4_0 kv",
+			cacheType:        "q4_0",
+			isEmbeddingModel: false,
+			want:             "q4_0",
+			wantErr:          false,
+		},
+		{
+			name:             "valid type for normal model with q8_0 kv",
 			cacheType:        "q8_0",
 			isEmbeddingModel: false,
 			want:             "q8_0",
@@ -36,14 +43,14 @@ func TestValidateKVCacheType(t *testing.T) {
 			name:             "invalid type",
 			cacheType:        "invalid",
 			isEmbeddingModel: false,
-			want:             "",
+			want:             "f16",
 			wantErr:          false,
 		},
 		{
 			name:             "quantized type for embedding model",
 			cacheType:        "q8_0",
 			isEmbeddingModel: true,
-			want:             "",
+			want:             "f16",
 			wantErr:          false,
 		},
 		{

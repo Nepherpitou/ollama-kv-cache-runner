@@ -38,7 +38,8 @@ func supportsFlashAttention(ggml GGMLModel) bool {
 }
 
 // ValidKVCacheTypes contains all supported KV cache types
-var ValidKVCacheTypes = []string{"f32", "f16", "q8_0", "q5_1", "q5_0", "iq4_nl", "q4_1", "q4_0"}
+// "q5_1", "q5_0", "iq4_nl", "q4_1" are also supported by llama.cpp, we're just not enabling them in Ollama
+var ValidKVCacheTypes = []string{"f32", "f16", "q8_0", "q4_0"}
 
 // ValidateKVCacheType checks if the given cache type is valid for the model type
 func ValidateKVCacheType(cacheType string, isEmbedding bool) (string, error) {
@@ -83,7 +84,7 @@ func GetServerParams(ggml GGMLModel, gpus discover.GpuInfoList, flashAttnRequest
 	} else {
 		slog.Info("Flash attention not enabled")
 		if !isEmbeddingModel && kvCacheType != "" {
-			quantizedTypes := []string{"q8_0", "q5_1", "q5_0", "iq4_nl", "q4_1", "q4_0"}
+			quantizedTypes := []string{"q8_0", "q4_0"}
 			if slices.Contains(quantizedTypes, kvCacheType) {
 				slog.Warn("Quantized cache types require flash attention. Using default cache type.")
 			}
