@@ -509,7 +509,7 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 			// the last one generated wasn't submitted to Decode
 			// - Remove any stop sequences that we stripped out
 			// - If truncateStop removed a portion of a token, drop that
-			// - As defence-in-depth, if truncatedToken didn't find a stop token
+			// - As defense-in-depth, if truncatedToken didn't find a stop token
 			// remove the extra one that we added to the cache len
 			tokenLen := len(seq.cache.Inputs) + 1
 			tokenLen -= origLen - newLen
