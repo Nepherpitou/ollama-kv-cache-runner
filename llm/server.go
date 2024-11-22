@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,7 +186,6 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 		"--model", model,
 		"--ctx-size", strconv.Itoa(opts.NumCtx),
 		"--batch-size", strconv.Itoa(opts.NumBatch),
-		"--embedding",
 	}
 
 	if opts.NumGPU >= 0 {
@@ -219,90 +217,11 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 		params = append(params, "--threads", strconv.Itoa(defaultThreads))
 	}
 
-	if !opts.F16KV && opts.CacheTypeK == "" && opts.CacheTypeV == "" {
-		params = append(params, "--memory-f32")
-	}
+	// Get KV cache type from config
+	kvCacheType := envconfig.KvCacheType()
 
-	isEmbeddingModel := false
-	if _, ok := ggml.KV()[fmt.Sprintf("%s.pooling_type", ggml.KV().Architecture())]; ok {
-		isEmbeddingModel = true
-	}
-
-	setCacheTypeParam := func(paramName, cacheType string) {
-		if cacheType == "" {
-			return
-		}
-
-		validCacheTypes := []string{"f32", "f16", "q8_0", "q5_1", "q5_0", "iq4_nl", "q4_1", "q4_0"}
-		if !slices.Contains(validCacheTypes, cacheType) {
-			slog.Warn("invalid cache type, ignoring", "param", paramName, "type", cacheType)
-			return
-		}
-
-		// For embedding models, only allow f16 and f32
-		if isEmbeddingModel && cacheType != "f16" && cacheType != "f32" {
-			slog.Warn("only f16 and f32 cache types are supported for embedding models, ignoring",
-				"param", paramName, "type", cacheType)
-			return
-		}
-
-		params = append(params, paramName, cacheType)
-		slog.Debug("Setting cache type", "param", paramName, "type", cacheType)
-	}
-
-	// Set cache types only if they are not empty
-	supportsFlashAttention := func(ggml *GGML) bool {
-		headCountK := ggml.KV().EmbeddingHeadCountK()
-		headCountV := ggml.KV().EmbeddingHeadCountV()
-
-		if headCountK == 0 || headCountV == 0 {
-			slog.Debug("Model is missing embedding head count for K or V")
-			return false
-		}
-
-		if headCountK != headCountV {
-			slog.Debug("Embedding head count K does not equal V", "K", headCountK, "V", headCountV)
-			return false
-		}
-
-		slog.Debug("Model supports flash attention", "headCountK", headCountK, "headCountV", headCountV)
-		return true
-	}
-
-	flashAttnSupported := supportsFlashAttention(ggml)
-
-	hardwareSupportsFlashAttn := true
-	for _, g := range gpus {
-		// only cuda (compute capability 7+) and metal support flash attention
-		if g.Library != "metal" && (g.Library != "cuda" || g.DriverMajor < 7) {
-			hardwareSupportsFlashAttn = false
-			break
-		}
-	}
-
-	flashAttnEnabled := envconfig.FlashAttention() && flashAttnSupported && hardwareSupportsFlashAttn && !isEmbeddingModel
-
-	slog.Debug("Flash attention status",
-		"supported_by_model", flashAttnSupported,
-		"supported_by_hardware", hardwareSupportsFlashAttn,
-		"is_embedding_model", isEmbeddingModel,
-		"enabled", flashAttnEnabled)
-
-	if flashAttnEnabled {
-		params = append(params, "--flash-attn")
-		slog.Info("Enabling flash attention")
-
-		setCacheTypeParam("--cache-type-k", opts.CacheTypeK)
-		setCacheTypeParam("--cache-type-v", opts.CacheTypeV)
-	} else {
-		slog.Info("Flash attention not enabled")
-		quantizedCacheTypes := []string{"q8_0", "q5_1", "q5_0", "iq4_nl", "q4_1", "q4_0"}
-		if !isEmbeddingModel && (opts.CacheTypeK != "" || opts.CacheTypeV != "") {
-			if slices.Contains(quantizedCacheTypes, opts.CacheTypeK) || slices.Contains(quantizedCacheTypes, opts.CacheTypeV) {
-				slog.Warn("Quantized cache types require flash attention. Using default cache types.")
-			}
-		}
-	}
+	// Get validated parameters including flash attention and KV cache settings
+	params = GetServerParams(ggml, gpus, envconfig.FlashAttention(), kvCacheType, params)
 
 	// mmap has issues with partial offloading on metal
 	for _, g := range gpus {
@@ -382,9 +301,9 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, ggml *GGML, adapter
 
 		// Note: we always put the dependency path first
 		// since this was the exact version we compiled/linked against
-		if gpus[0].DependencyPath != "" {
+		if gpus[0].DependencyPath != nil {
 			// assume gpus from the same library have the same dependency path
-			libraryPaths = append([]string{gpus[0].DependencyPath}, libraryPaths...)
+			libraryPaths = append(gpus[0].DependencyPath, libraryPaths...)
 		}
 
 		server := filepath.Join(dir, "ollama_llama_server")
@@ -914,13 +833,15 @@ func (s *llmServer) Completion(ctx context.Context, req CompletionRequest, fn fu
 	}
 
 	if err := scanner.Err(); err != nil {
-		if strings.Contains(err.Error(), "unexpected EOF") {
+		if strings.Contains(err.Error(), "unexpected EOF") || strings.Contains(err.Error(), "forcibly closed") {
 			s.Close()
-			msg := ""
+			var msg string
 			if s.status != nil && s.status.LastErrMsg != "" {
 				msg = s.status.LastErrMsg
+			} else {
+				msg = err.Error()
 			}
-			return fmt.Errorf("an unknown error was encountered while running the model %s", msg)
+			return fmt.Errorf("an error was encountered while running the model: %s", msg)
 		}
 
 		return fmt.Errorf("error reading llm response: %v", err)
@@ -1168,7 +1089,9 @@ func (s *llmServer) EstimatedTotal() uint64 {
 func (s *llmServer) EstimatedVRAMByGPU(gpuID string) uint64 {
 	for i, gpu := range s.gpus {
 		if gpu.ID == gpuID {
-			return s.estimate.GPUSizes[i]
+			if i < len(s.estimate.GPUSizes) {
+				return s.estimate.GPUSizes[i]
+			}
 		}
 	}
 	return 0

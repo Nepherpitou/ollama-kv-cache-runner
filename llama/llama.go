@@ -21,6 +21,8 @@ package llama
 #cgo cuda CFLAGS: -fPIE -DGGML_USE_CUDA -DGGML_CUDA_DMMV_X=32 -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128 -DGGML_CUDA_MMV_Y=1 -DGGML_BUILD=1
 #cgo cuda CXXFLAGS: -DGGML_USE_CUDA -DGGML_CUDA_DMMV_X=32 -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128 -DGGML_CUDA_MMV_Y=1 -DGGML_BUILD=1
 #cgo cuda CXXFLAGS: -DGGML_USE_CUDA -DGGML_CUDA_DMMV_X=32 -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128 -DGGML_CUDA_MMV_Y=1 -DGGML_BUILD=1
+#cgo cuda_jetpack5 LDFLAGS: -lggml_cuda_jetpack5 -L/usr/local/cuda-11/lib64
+#cgo cuda_jetpack6 LDFLAGS: -lggml_cuda_jetpack6 -L/usr/local/cuda-12/lib64
 #cgo cuda_v11 LDFLAGS: -lggml_cuda_v11 -L/usr/local/cuda-11/lib64
 #cgo cuda_v12 LDFLAGS: -lggml_cuda_v12 -L/usr/local/cuda-12/lib64
 #cgo darwin,amd64 CFLAGS: -Wno-incompatible-pointer-types-discards-qualifiers
@@ -36,8 +38,8 @@ package llama
 #cgo linux CXXFLAGS: -D_GNU_SOURCE
 #cgo linux,amd64 LDFLAGS: -L${SRCDIR}/build/Linux/amd64
 #cgo linux,amd64 LDFLAGS: -L${SRCDIR}/build/Linux/amd64
-#cgo linux,arm64 CFLAGS: -D__aarch64__ -D__ARM_NEON -D__ARM_FEATURE_FMA -D__ARM_FEATURE_MATMUL_INT8
-#cgo linux,arm64 CXXFLAGS: -D__aarch64__ -D__ARM_NEON -D__ARM_FEATURE_FMA -D__ARM_FEATURE_MATMUL_INT8
+#cgo linux,arm64 CFLAGS: -D__aarch64__ -D__ARM_NEON -D__ARM_FEATURE_FMA
+#cgo linux,arm64 CXXFLAGS: -D__aarch64__ -D__ARM_NEON -D__ARM_FEATURE_FMA
 #cgo linux,arm64 LDFLAGS: -L${SRCDIR}/build/Linux/arm64
 #cgo linux,arm64,sve CFLAGS: -march=armv8.6-a+sve
 #cgo linux,arm64,sve CXXFLAGS: -march=armv8.6-a+sve
@@ -86,6 +88,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"runtime/cgo"
 	"slices"
@@ -138,7 +141,7 @@ type ContextParams struct {
 	c C.struct_llama_context_params
 }
 
-func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, flashAttention bool, cacheTypeK string, cacheTypeV string) ContextParams {
+func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, flashAttention bool, kvCacheType string) ContextParams {
 	params := C.llama_context_default_params()
 	params.n_ctx = C.uint(numCtx)
 	params.n_batch = C.uint(batchSize)
@@ -147,8 +150,8 @@ func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, fla
 	params.n_threads_batch = params.n_threads
 	params.embeddings = C.bool(true)
 	params.flash_attn = C.bool(flashAttention)
-	params.type_k = KvCacheTypeFromStr(cacheTypeK)
-	params.type_v = KvCacheTypeFromStr(cacheTypeV)
+	params.type_k = KvCacheTypeFromStr(kvCacheType)
+	params.type_v = KvCacheTypeFromStr(kvCacheType)
 
 	return ContextParams{c: params}
 }
@@ -158,9 +161,7 @@ type Context struct {
 	numThreads int
 }
 
-func (c *Context) KvCacheClear() {
-	C.llama_kv_cache_clear(c.c)
-}
+var ErrKvCacheFull = errors.New("could not find a kv cache slot")
 
 func (c *Context) Decode(batch *Batch) error {
 	// Positive return values does not mean a fatal error, but rather a warning.
@@ -174,7 +175,7 @@ func (c *Context) Decode(batch *Batch) error {
 	}
 
 	if code > 0 {
-		return fmt.Errorf("could not find a KV slot for the batch - try reducing the size of the batch or increase the context. code: %d", code)
+		return ErrKvCacheFull
 	}
 
 	return nil
@@ -194,6 +195,14 @@ func (c *Context) KvCacheSeqRm(seqId int, p0 int, p1 int) bool {
 
 func (c *Context) KvCacheSeqCp(srcSeqId int, dstSeqId int, p0 int, p1 int) {
 	C.llama_kv_cache_seq_cp(c.c, C.int(srcSeqId), C.int(dstSeqId), C.int(p0), C.int(p1))
+}
+
+func (c *Context) KvCacheClear() {
+	C.llama_kv_cache_clear(c.c)
+}
+
+func (c *Context) KvCacheDefrag() {
+	C.llama_kv_cache_defrag(c.c)
 }
 
 // Get the embeddings for a sequence id
@@ -385,6 +394,8 @@ func (b *Batch) Add(token int, embed []float32, pos int, logits bool, seqIds ...
 
 	if logits {
 		unsafe.Slice(b.c.logits, b.allocSize())[b.c.n_tokens] = 1
+	} else {
+		unsafe.Slice(b.c.logits, b.allocSize())[b.c.n_tokens] = 0
 	}
 
 	b.c.n_tokens += 1
@@ -601,6 +612,10 @@ func (c *Context) SetCrossAttention(state bool) {
 	C.llama_set_cross_attention(c.c, C.bool(state))
 }
 
+func (c *Context) Synchronize() {
+	C.llama_synchronize(c.c)
+}
+
 // sampling
 // TODO: this is a temporary wrapper to allow calling C++ code from CGo
 type SamplingContext struct {
@@ -671,6 +686,8 @@ func (s *SamplingContext) Accept(id int, applyGrammar bool) {
 }
 
 // KvCacheTypeFromStr converts a string cache type to the corresponding GGML type value
+// Note the following llama.cpp cache types are not enabled:
+// "Q5_1", "Q5_0" , "IQ4_NL", "Q4_1"
 func KvCacheTypeFromStr(s string) C.enum_ggml_type {
 	switch s {
 	case "f32":
@@ -681,15 +698,8 @@ func KvCacheTypeFromStr(s string) C.enum_ggml_type {
 		return C.GGML_TYPE_Q8_0
 	case "q4_0":
 		return C.GGML_TYPE_Q4_0
-	case "q4_1":
-		return C.GGML_TYPE_Q4_1
-	case "iq4_nl":
-		return C.GGML_TYPE_IQ4_NL
-	case "q5_0":
-		return C.GGML_TYPE_Q5_0
-	case "q5_1":
-		return C.GGML_TYPE_Q5_1
 	default:
-		panic("Unsupported cache type: " + s)
+		slog.Warn("Unsupported cache type, defaulting to f16", "type", s)
+		return C.GGML_TYPE_F16
 	}
 }

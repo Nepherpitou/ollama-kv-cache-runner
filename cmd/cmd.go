@@ -800,9 +800,9 @@ func ShowHandler(cmd *cobra.Command, args []string) error {
 		case "parameters":
 			fmt.Println(resp.Parameters)
 		case "system":
-			fmt.Println(resp.System)
+			fmt.Print(resp.System)
 		case "template":
-			fmt.Println(resp.Template)
+			fmt.Print(resp.Template)
 		}
 
 		return nil
@@ -1482,8 +1482,7 @@ func NewCLI() *cobra.Command {
 				envVars["OLLAMA_SCHED_SPREAD"],
 				envVars["OLLAMA_TMPDIR"],
 				envVars["OLLAMA_FLASH_ATTENTION"],
-				envVars["OLLAMA_CACHE_TYPE_K"],
-				envVars["OLLAMA_CACHE_TYPE_V"],
+				envVars["OLLAMA_KV_CACHE_TYPE"],
 				envVars["OLLAMA_LLM_LIBRARY"],
 				envVars["OLLAMA_GPU_OVERHEAD"],
 				envVars["OLLAMA_LOAD_TIMEOUT"],

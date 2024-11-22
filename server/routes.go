@@ -267,7 +267,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		prompt = b.String()
 	}
 
-	slog.Debug("generate request", "prompt", prompt, "images", images)
+	slog.Debug("generate request", "images", len(images), "prompt", prompt)
 
 	ch := make(chan any)
 	go func() {
@@ -507,7 +507,7 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 	embedding, err := r.Embedding(c.Request.Context(), req.Prompt)
 	if err != nil {
 		slog.Info(fmt.Sprintf("embedding generation failed: %v", err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate embedding"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Errorf("failed to generate embedding: %v", err)})
 		return
 	}
 
@@ -540,7 +540,8 @@ func (s *Server) PullHandler(c *gin.Context) {
 		return
 	}
 
-	if err := checkNameExists(name); err != nil {
+	name, err = getExistingName(name)
+	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -621,19 +622,20 @@ func (s *Server) PushHandler(c *gin.Context) {
 	streamResponse(c, ch)
 }
 
-func checkNameExists(name model.Name) error {
-	names, err := Manifests()
+// getExistingName returns the original, on disk name if the input name is a
+// case-insensitive match, otherwise it returns the input name.
+func getExistingName(n model.Name) (model.Name, error) {
+	var zero model.Name
+	existing, err := Manifests(true)
 	if err != nil {
-		return err
+		return zero, err
 	}
-
-	for n := range names {
-		if strings.EqualFold(n.Filepath(), name.Filepath()) && n != name {
-			return errors.New("a model with that name already exists")
+	for e := range existing {
+		if n.EqualFold(e) {
+			return e, nil
 		}
 	}
-
-	return nil
+	return n, nil
 }
 
 func (s *Server) CreateHandler(c *gin.Context) {
@@ -652,7 +654,8 @@ func (s *Server) CreateHandler(c *gin.Context) {
 		return
 	}
 
-	if err := checkNameExists(name); err != nil {
+	name, err := getExistingName(name)
+	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -894,7 +897,7 @@ func getKVData(digest string, verbose bool) (llm.KV, error) {
 }
 
 func (s *Server) ListHandler(c *gin.Context) {
-	ms, err := Manifests()
+	ms, err := Manifests(true)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -958,14 +961,19 @@ func (s *Server) CopyHandler(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("source %q is invalid", r.Source)})
 		return
 	}
+	src, err := getExistingName(src)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	dst := model.ParseName(r.Destination)
 	if !dst.IsValid() {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("destination %q is invalid", r.Destination)})
 		return
 	}
-
-	if err := checkNameExists(dst); err != nil {
+	dst, err = getExistingName(dst)
+	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1211,18 +1219,22 @@ func Serve(ln net.Listener) error {
 	}
 
 	if !envconfig.NoPrune() {
-		// clean up unused layers and manifests
-		if err := PruneLayers(); err != nil {
-			return err
-		}
+		if _, err := Manifests(false); err != nil {
+			slog.Warn("corrupt manifests detected, skipping prune operation.  Re-pull or delete to clear", "error", err)
+		} else {
+			// clean up unused layers and manifests
+			if err := PruneLayers(); err != nil {
+				return err
+			}
 
-		manifestsPath, err := GetManifestPath()
-		if err != nil {
-			return err
-		}
+			manifestsPath, err := GetManifestPath()
+			if err != nil {
+				return err
+			}
 
-		if err := PruneDirectory(manifestsPath); err != nil {
-			return err
+			if err := PruneDirectory(manifestsPath); err != nil {
+				return err
+			}
 		}
 	}
 

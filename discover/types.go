@@ -25,7 +25,7 @@ type GpuInfo struct { // TODO better name maybe "InferenceProcessor"?
 	MinimumMemory uint64 `json:"-"`
 
 	// Any extra PATH/LD_LIBRARY_PATH dependencies required for the Library to operate properly
-	DependencyPath string `json:"lib_path,omitempty"`
+	DependencyPath []string `json:"lib_path,omitempty"`
 
 	// Extra environment variables specific to the GPU as list of [key,value]
 	EnvWorkarounds [][2]string `json:"envs,omitempty"`
@@ -182,4 +182,25 @@ func (si SystemInfo) GetOptimalThreadCount() int {
 	}
 
 	return coreCount
+}
+
+// Return if the system supports flash attention
+func (l GpuInfoList) SupportsFlashAttention() bool {
+	for _, gpu := range l {
+		// Metal always supports flash attention
+		if gpu.Library == "metal" {
+			return true
+		}
+
+		// CUDA with compute capability 7+ supports flash attention
+		if gpu.Library == "cuda" && gpu.DriverMajor >= 7 {
+			return true
+		}
+
+		// ROCm supports flash attention
+		if gpu.Library == "rocm" {
+			return true
+		}
+	}
+	return false
 }

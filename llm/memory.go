@@ -129,15 +129,15 @@ func EstimateGPULayers(gpus []discover.GpuInfo, ggml *GGML, projectors []string,
 		isEmbeddingModel = true
 	}
 
-	// Estimate the memory required for K and V caches separately as they can have different quantization types
-	kSize := estimateKvCacheSize(opts.CacheTypeK, uint64(opts.NumCtx), ggml.KV().BlockCount(), ggml.KV().EmbeddingHeadCountK(), ggml.KV().HeadCountKV(), isEmbeddingModel)
-	vSize := estimateKvCacheSize(opts.CacheTypeV, uint64(opts.NumCtx), ggml.KV().BlockCount(), ggml.KV().EmbeddingHeadCountV(), ggml.KV().HeadCountKV(), isEmbeddingModel)
-	kv := kSize + vSize
+	// Estimate the memory required for KV cache quantization
+	kv := estimateKvCacheSize(envconfig.KvCacheType(), uint64(opts.NumCtx), ggml.KV().BlockCount(), ggml.KV().EmbeddingHeadCountK(), ggml.KV().HeadCountKV(), isEmbeddingModel) * 2
 
 	// KV is proportional to the number of layers
 	layerSize += kv / ggml.KV().BlockCount()
 
-	graphPartialOffload, graphFullOffload = ggml.GraphSize(uint64(opts.NumCtx), uint64(min(opts.NumCtx, opts.NumBatch)))
+	// Get graph sizes from ggml
+	_, graphPartialOffload, graphFullOffload = ggml.GraphSize(uint64(opts.NumCtx), uint64(min(opts.NumCtx, opts.NumBatch)))
+
 	if graphPartialOffload == 0 {
 		graphPartialOffload = ggml.KV().GQA() * kv / 6
 	}
@@ -457,6 +457,8 @@ func estimateKvCacheSize(cacheType string, numCtx, blockCount, embeddingHeadCoun
 		cacheType = "f16" // Default to f16 for embedding models if an unsupported type is specified
 	}
 
+	// Note the following llama.cpp cache types are not enabled:
+	// "q5_1" (0.65), "q5_0" (0.625), "iq4_nl" (0.6), "q4_1" (0.55)
 	switch cacheType {
 	case "f32", "fp32":
 		bytesPerElement = 4 // fp32
@@ -464,14 +466,6 @@ func estimateKvCacheSize(cacheType string, numCtx, blockCount, embeddingHeadCoun
 		bytesPerElement = 2 // fp16
 	case "q8_0":
 		bytesPerElement = 1 // 1/2 of fp16
-	case "q5_1":
-		bytesPerElement = 0.65
-	case "q5_0":
-		bytesPerElement = 0.625
-	case "iq4_nl":
-		bytesPerElement = 0.6 // 3/4 of fp16
-	case "q4_1":
-		bytesPerElement = 0.55
 	case "q4_0":
 		bytesPerElement = 0.5 // 1/4 of fp16
 	default:
